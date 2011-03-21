@@ -724,6 +724,7 @@ po.layer = function(load, unload) {
       tile = true,
       visible = true,
       zoom,
+      tilesLocked,
       id,
       map,
       container = po.svg("g"),
@@ -768,6 +769,25 @@ po.layer = function(load, unload) {
     }
   }
 
+  // tile-specific projection
+  function projection(c) {
+    var zoom = c.zoom,
+        max = zoom < 0 ? 1 : 1 << zoom,
+        column = c.column % max,
+        row = c.row;
+    if (column < 0) column += max;
+    return {
+      locationPoint: function(l) {
+        var c = po.map.locationCoordinate(l),
+            k = Math.pow(2, zoom - c.zoom);
+        return {
+          x: tileSize.x * (k * c.column - column),
+          y: tileSize.y * (k * c.row - row)
+        };
+      }
+    };
+  }
+
   function move() {
     var map = layer.map(), // in case the layer is removed
         mapZoom = map.zoom(),
@@ -802,6 +822,27 @@ po.layer = function(load, unload) {
         c2 = map.pointCoordinate(tileCenter, mapSize),
         c3 = map.pointCoordinate(tileCenter, {x: 0, y: mapSize.y});
 
+    function positionTiles(locks) {
+      // position tiles
+      for (var key in locks) {
+        var t = locks[key],
+            k = Math.pow(2, t.level = t.zoom - tileCenter.zoom);
+        t.element.setAttribute("transform", "translate("
+          + (t.x = tileSize.x * (t.column - tileCenter.column * k)) + ","
+          + (t.y = tileSize.y * (t.row - tileCenter.row * k)) + ")");
+      }
+
+    }
+
+    // record which tiles are visible
+    var oldLocks = cache.locks(), newLocks = {};
+
+    if (tilesLocked) {
+      positionTiles(oldLocks);
+      layer.dispatch({type: "move"});
+      return;
+    }
+
     // round to pixel boundary to avoid anti-aliasing artifacts
     if (!mapZoomFraction && !mapAngle && !transform) {
       tileCenter.column = (Math.round(tileSize.x * tileCenter.column) + (mapSize.x & 1) / 2) / tileSize.x;
@@ -828,34 +869,16 @@ po.layer = function(load, unload) {
       c0.zoom = c1.zoom = c2.zoom = c3.zoom += tileLevel;
     }
 
-    // tile-specific projection
-    function projection(c) {
-      var zoom = c.zoom,
-          max = zoom < 0 ? 1 : 1 << zoom,
-          column = c.column % max,
-          row = c.row;
-      if (column < 0) column += max;
-      return {
-        locationPoint: function(l) {
-          var c = po.map.locationCoordinate(l),
-              k = Math.pow(2, zoom - c.zoom);
-          return {
-            x: tileSize.x * (k * c.column - column),
-            y: tileSize.y * (k * c.row - row)
-          };
-        }
-      };
-    }
-
-    // record which tiles are visible
-    var oldLocks = cache.locks(), newLocks = {};
-
     // reset the proxy counts
     for (var key in oldLocks) {
       oldLocks[key].proxyCount = 0;
     }
 
-    // load the tiles!
+    // determine visible tiles
+    var visibleTiles = [];
+    var z = c0.zoom,
+        z0 = 2 - tileLevel,
+        z1 = 4 + tileLevel;
     if (visible && tileLevel > -5 && tileLevel < 3) {
       var ymax = c0.zoom < 0 ? 1 : 1 << c0.zoom;
       if (tile) {
@@ -870,70 +893,69 @@ po.layer = function(load, unload) {
         scanLine(x, x + 1, y);
       }
     }
-
-    // scan-line conversion
     function scanLine(x0, x1, y) {
-      var z = c0.zoom,
-          z0 = 2 - tileLevel,
-          z1 = 4 + tileLevel;
-
       for (var x = x0; x < x1; x++) {
-        var t = cache.load({column: x, row: y, zoom: z}, projection);
-        if (!t.ready && !(t.key in newLocks)) {
-          t.proxyRefs = {};
-          var c, full, proxy;
+        visibleTiles.push({column: x, row: y, zoom: z});
+      }
+    }
+    
+    // load the tiles, from tileCenter in order of taxicab distance
+    visibleTiles.sort(function (infoA, infoB) {
+      var dA = Math.abs(infoA.row - tileCenter.row) + Math.abs(infoA.column - tileCenter.column);
+      var dB = Math.abs(infoB.row - tileCenter.row) + Math.abs(infoB.column - tileCenter.column);
+      return dA - dB;
+    });
+    for (var tileIdx = 0, tilesLen = visibleTiles.length; tileIdx < tilesLen; tileIdx++) {
+      var tileInfo = visibleTiles[tileIdx],
+          t = cache.load(tileInfo, projection);
+      if (!t.ready && !(t.key in newLocks)) {
+        var x = tileInfo.column, y = tileInfo.row;
+        t.proxyRefs = {};
+        var c, full, proxy;
 
-          // downsample high-resolution tiles
-          for (var dz = 1; dz <= z0; dz++) {
-            full = true;
-            for (var dy = 0, k = 1 << dz; dy <= k; dy++) {
-              for (var dx = 0; dx <= k; dx++) {
-                proxy = cache.peek(c = {
-                  column: (x << dz) + dx,
-                  row: (y << dz) + dy,
-                  zoom: z + dz
-                });
-                if (proxy && proxy.ready) {
-                  newLocks[proxy.key] = cache.load(c);
-                  proxy.proxyCount++;
-                  t.proxyRefs[proxy.key] = proxy;
-                } else {
-                  full = false;
-                }
-              }
-            }
-            if (full) break;
-          }
-
-          // upsample low-resolution tiles
-          if (!full) {
-            for (var dz = 1; dz <= z1; dz++) {
+        // downsample high-resolution tiles
+        for (var dz = 1; dz <= z0; dz++) {
+          full = true;
+          for (var dy = 0, k = 1 << dz; dy <= k; dy++) {
+            for (var dx = 0; dx <= k; dx++) {
               proxy = cache.peek(c = {
-                column: x >> dz,
-                row: y >> dz,
-                zoom: z - dz
+                column: (x << dz) + dx,
+                row: (y << dz) + dy,
+                zoom: z + dz
               });
               if (proxy && proxy.ready) {
                 newLocks[proxy.key] = cache.load(c);
                 proxy.proxyCount++;
                 t.proxyRefs[proxy.key] = proxy;
-                break;
+              } else {
+                full = false;
               }
             }
           }
+          if (full) break;
         }
-        newLocks[t.key] = t;
+
+        // upsample low-resolution tiles
+        if (!full) {
+          for (var dz = 1; dz <= z1; dz++) {
+            proxy = cache.peek(c = {
+              column: x >> dz,
+              row: y >> dz,
+              zoom: z - dz
+            });
+            if (proxy && proxy.ready) {
+              newLocks[proxy.key] = cache.load(c);
+              proxy.proxyCount++;
+              t.proxyRefs[proxy.key] = proxy;
+              break;
+            }
+          }
+        }
       }
+      newLocks[t.key] = t;
     }
 
-    // position tiles
-    for (var key in newLocks) {
-      var t = newLocks[key],
-          k = Math.pow(2, t.level = t.zoom - tileCenter.zoom);
-      t.element.setAttribute("transform", "translate("
-        + (t.x = tileSize.x * (t.column - tileCenter.column * k)) + ","
-        + (t.y = tileSize.y * (t.row - tileCenter.row * k)) + ")");
-    }
+    positionTiles(newLocks);
 
     // remove tiles that are no longer visible
     for (var key in oldLocks) {
@@ -1026,6 +1048,13 @@ po.layer = function(load, unload) {
   layer.zoom = function(x) {
     if (!arguments.length) return zoom;
     zoom = typeof x == "function" || x == null ? x : function() { return x; };
+    if (map) move();
+    return layer;
+  };
+
+  layer.lockTiles = function(x) {
+    if (!arguments.length) return tilesLocked;
+    tilesLocked = x;
     if (map) move();
     return layer;
   };
