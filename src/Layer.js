@@ -54,7 +54,8 @@ po.layer = function(load, unload) {
     var zoom = c.zoom,
         max = zoom < 0 ? 1 : 1 << zoom,
         column = c.column % max,
-        row = c.row;
+        row = c.row,
+        tileSize = map.tileSize();
     if (column < 0) column += max;
     return {
       locationPoint: function(l) {

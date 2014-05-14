@@ -1,4 +1,4 @@
-if (!org) var org = {};
+if (!window.org) window.org = {};
 if (!org.polymaps) org.polymaps = {};
 (function(po){
 
@@ -774,7 +774,8 @@ po.layer = function(load, unload) {
     var zoom = c.zoom,
         max = zoom < 0 ? 1 : 1 << zoom,
         column = c.column % max,
-        row = c.row;
+        row = c.row,
+        tileSize = map.tileSize();
     if (column < 0) column += max;
     return {
       locationPoint: function(l) {
@@ -2523,8 +2524,20 @@ po.stylist = function() {
       }
       if (v = title) {
         if (typeof v === "function") v = v.call(null, d);
-        while (o.lastChild) o.removeChild(o.lastChild);
-        if (v != null) o.appendChild(po.svg("title")).appendChild(document.createTextNode(v));
+        if (o.lastChild && o.lastChild.nodeName != 'path' && o.lastChild.nodeName != 'circle') {
+            while (o.lastChild) {
+                o.removeChild(o.lastChild);
+            }
+        }
+        if (v != null) {
+            if (o.children.length) {
+               for (var i=0; i < o.children.length; i++) {
+                o.children[i].appendChild(po.svg("title")).appendChild(document.createTextNode(v));
+               }
+            } else {
+                o.appendChild(po.svg("title")).appendChild(document.createTextNode(v));
+            }
+        }
       }
     }
   }
